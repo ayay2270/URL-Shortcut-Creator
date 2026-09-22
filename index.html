@@ -126,9 +126,15 @@
 
     .actions {
       display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
       gap: 0.65rem;
       margin-top: 0.35rem;
+    }
+
+    .actions-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
     }
 
     button {
@@ -153,7 +159,8 @@
 
     .btn-primary:hover { background: #4ecbb2; }
 
-    .btn-primary:disabled {
+    .btn-primary:disabled,
+    .btn-zip:disabled {
       opacity: 0.45;
       cursor: not-allowed;
       transform: none;
@@ -168,6 +175,34 @@
     .btn-ghost:hover {
       color: var(--ink);
       border-color: rgba(232, 238, 246, 0.28);
+    }
+
+    .btn-zip {
+      width: 100%;
+      background: var(--bg2);
+      color: var(--ink);
+      border: 1px solid rgba(61, 184, 160, 0.55);
+      line-height: 1.25;
+    }
+
+    .btn-zip:hover {
+      border-color: var(--accent);
+      background: #2a384c;
+    }
+
+    .btn-zip .btn-sub {
+      display: block;
+      margin-top: 0.2rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--muted);
+    }
+
+    .download-note {
+      margin: 0;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      color: var(--muted);
     }
 
     .status {
@@ -236,8 +271,15 @@
       </div>
 
       <div class="actions">
-        <button type="submit" class="btn-primary" id="downloadBtn">Download .url shortcut</button>
-        <button type="button" class="btn-ghost" id="resetBtn">Clear</button>
+        <div class="actions-row">
+          <button type="submit" class="btn-primary" id="downloadBtn">Download .url shortcut</button>
+          <button type="button" class="btn-ghost" id="resetBtn">Clear</button>
+        </div>
+        <p class="download-note">Some Chromium-based browsers may rename direct .url downloads to .download.</p>
+        <button type="button" class="btn-zip" id="zipBtn">
+          Download as ZIP
+          <span class="btn-sub">Recommended for Edge / Chrome</span>
+        </button>
       </div>
 
       <p class="status" id="status" role="status" aria-live="polite"></p>
@@ -261,6 +303,109 @@ URL=</pre>
       var statusEl = document.getElementById("status");
       var resetBtn = document.getElementById("resetBtn");
       var downloadBtn = document.getElementById("downloadBtn");
+      var zipBtn = document.getElementById("zipBtn");
+
+      var CRC_TABLE = (function () {
+        var table = new Uint32Array(256);
+        for (var i = 0; i < 256; i++) {
+          var c = i;
+          for (var k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+          }
+          table[i] = c >>> 0;
+        }
+        return table;
+      })();
+
+      function crc32Bytes(bytes) {
+        var crc = 0xffffffff;
+        for (var i = 0; i < bytes.length; i++) {
+          crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+      }
+
+      function u16(n) {
+        return new Uint8Array([n & 0xff, (n >>> 8) & 0xff]);
+      }
+
+      function u32(n) {
+        return new Uint8Array([
+          n & 0xff,
+          (n >>> 8) & 0xff,
+          (n >>> 16) & 0xff,
+          (n >>> 24) & 0xff
+        ]);
+      }
+
+      function concatBytes(parts) {
+        var total = 0;
+        for (var i = 0; i < parts.length; i++) total += parts[i].length;
+        var out = new Uint8Array(total);
+        var offset = 0;
+        for (var j = 0; j < parts.length; j++) {
+          out.set(parts[j], offset);
+          offset += parts[j].length;
+        }
+        return out;
+      }
+
+      // Minimal ZIP (store / no compression) for a single file — no CDN needed.
+      function createZipBlob(entryName, fileText) {
+        var encoder = new TextEncoder();
+        var nameBytes = encoder.encode(entryName);
+        var dataBytes = encoder.encode(fileText);
+        var crc = crc32Bytes(dataBytes);
+        var size = dataBytes.length;
+        var localHeader = concatBytes([
+          u32(0x04034b50),
+          u16(20),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(crc),
+          u32(size),
+          u32(size),
+          u16(nameBytes.length),
+          u16(0),
+          nameBytes
+        ]);
+        var centralHeader = concatBytes([
+          u32(0x02014b50),
+          u16(20),
+          u16(20),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(crc),
+          u32(size),
+          u32(size),
+          u16(nameBytes.length),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(0),
+          u32(0),
+          nameBytes
+        ]);
+        var endRecord = concatBytes([
+          u32(0x06054b50),
+          u16(0),
+          u16(0),
+          u16(1),
+          u16(1),
+          u32(centralHeader.length),
+          u32(localHeader.length + dataBytes.length),
+          u16(0)
+        ]);
+        return new Blob(
+          [localHeader, dataBytes, centralHeader, endRecord],
+          { type: "application/zip" }
+        );
+      }
 
       function normalizeUrl(raw) {
         var value = (raw || "").trim();
@@ -285,16 +430,20 @@ URL=</pre>
         return "[InternetShortcut]\r\nURL=" + url + "\r\n";
       }
 
-      function sanitizeFileName(name, fallbackHost) {
+      function sanitizeBaseName(name, fallbackHost) {
         var base = (name || "").trim();
         if (!base) {
           base = fallbackHost || "shortcut";
         }
-        base = base.replace(/\.url$/i, "");
+        base = base.replace(/\.url$/i, "").replace(/\.zip$/i, "");
         base = base.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/\s+/g, " ").trim();
         if (!base) base = "shortcut";
         if (base.length > 100) base = base.slice(0, 100);
-        return base + ".url";
+        return base;
+      }
+
+      function sanitizeFileName(name, fallbackHost) {
+        return sanitizeBaseName(name, fallbackHost) + ".url";
       }
 
       function setStatus(message, kind) {
@@ -305,6 +454,32 @@ URL=</pre>
       function updatePreview() {
         var url = normalizeUrl(targetUrl.value);
         preview.textContent = "[InternetShortcut]\nURL=" + (url || "");
+      }
+
+      function getValidatedInputs() {
+        var url = normalizeUrl(targetUrl.value);
+        if (!url || !isValidUrl(url)) {
+          setStatus("Enter a valid http:// or https:// URL.", "error");
+          targetUrl.focus();
+          return null;
+        }
+
+        targetUrl.value = url;
+        updatePreview();
+
+        var host = "";
+        try {
+          host = new URL(url).hostname.replace(/^www\./, "");
+        } catch (e) {}
+
+        var baseName = sanitizeBaseName(fileName.value, host);
+        return {
+          url: url,
+          baseName: baseName,
+          urlFileName: baseName + ".url",
+          zipFileName: baseName + ".zip",
+          content: buildUrlFileContent(url)
+        };
       }
 
       targetUrl.addEventListener("input", updatePreview);
@@ -321,23 +496,11 @@ URL=</pre>
         event.preventDefault();
         setStatus("");
 
-        var url = normalizeUrl(targetUrl.value);
-        if (!url || !isValidUrl(url)) {
-          setStatus("Enter a valid http:// or https:// URL.", "error");
-          targetUrl.focus();
-          return;
-        }
+        var inputs = getValidatedInputs();
+        if (!inputs) return;
 
-        targetUrl.value = url;
-        updatePreview();
-
-        var host = "";
-        try {
-          host = new URL(url).hostname.replace(/^www\./, "");
-        } catch (e) {}
-
-        var downloadName = sanitizeFileName(fileName.value, host);
-        var content = buildUrlFileContent(url);
+        var downloadName = inputs.urlFileName;
+        var content = inputs.content;
         // Prefer the File System Access API in Chromium/Edge so the
         // saved name keeps a real .url extension (blob downloads are
         // often renamed to *.download for this extension).
@@ -375,8 +538,19 @@ URL=</pre>
         downloadViaAnchor(content, downloadName);
       });
 
-      function downloadViaAnchor(content, downloadName) {
-        var blob = new Blob([content], { type: "application/octet-stream" });
+      zipBtn.addEventListener("click", function () {
+        setStatus("");
+        var inputs = getValidatedInputs();
+        if (!inputs) return;
+
+        var zipBlob = createZipBlob(inputs.urlFileName, inputs.content);
+        downloadViaAnchor(zipBlob, inputs.zipFileName, "application/zip");
+      });
+
+      function downloadViaAnchor(contentOrBlob, downloadName, mimeType) {
+        var blob = contentOrBlob instanceof Blob
+          ? contentOrBlob
+          : new Blob([contentOrBlob], { type: mimeType || "application/octet-stream" });
         var objectUrl = URL.createObjectURL(blob);
 
         var anchor = document.createElement("a");
