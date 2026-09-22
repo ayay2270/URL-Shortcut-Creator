@@ -499,24 +499,33 @@ URL=</pre>
         var inputs = getValidatedInputs();
         if (!inputs) return;
 
-        var downloadName = inputs.urlFileName;
+        // Always include the full .url extension in the suggested Save As name.
+        var downloadName = inputs.baseName + ".url";
         var content = inputs.content;
         // Prefer the File System Access API in Chromium/Edge so the
-        // saved name keeps a real .url extension (blob downloads are
-        // often renamed to *.download for this extension).
+        // Save As dialog defaults to a .url file type. Edge may still
+        // show its normal ".url may be dangerous" warning — that is
+        // expected and must not be bypassed.
         if (window.showSaveFilePicker) {
           downloadBtn.disabled = true;
           window.showSaveFilePicker({
             suggestedName: downloadName,
+            excludeAcceptAllOption: true,
             types: [
               {
-                description: "Internet Shortcut",
-                accept: { "application/internet-shortcut": [".url"] }
+                description: "Internet Shortcut (*.url)",
+                accept: {
+                  "application/internet-shortcut": [".url"],
+                  "application/x-url": [".url"]
+                }
               }
             ]
           }).then(function (handle) {
             return handle.createWritable().then(function (writable) {
-              return writable.write(content).then(function () {
+              var fileBlob = new Blob([content], {
+                type: "application/internet-shortcut"
+              });
+              return writable.write(fileBlob).then(function () {
                 return writable.close();
               });
             });
