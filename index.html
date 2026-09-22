@@ -338,22 +338,66 @@ URL=</pre>
 
         var downloadName = sanitizeFileName(fileName.value, host);
         var content = buildUrlFileContent(url);
+        // Prefer the File System Access API in Chromium/Edge so the
+        // saved name keeps a real .url extension (blob downloads are
+        // often renamed to *.download for this extension).
+        if (window.showSaveFilePicker) {
+          downloadBtn.disabled = true;
+          window.showSaveFilePicker({
+            suggestedName: downloadName,
+            types: [
+              {
+                description: "Internet Shortcut",
+                accept: { "application/internet-shortcut": [".url"] }
+              }
+            ]
+          }).then(function (handle) {
+            return handle.createWritable().then(function (writable) {
+              return writable.write(content).then(function () {
+                return writable.close();
+              });
+            });
+          }).then(function () {
+            setStatus("Downloaded " + downloadName, "ok");
+          }).catch(function (err) {
+            if (err && err.name === "AbortError") {
+              setStatus("");
+              return;
+            }
+            // Fall back if the picker is unavailable or fails.
+            downloadViaAnchor(content, downloadName);
+          }).finally(function () {
+            downloadBtn.disabled = false;
+          });
+          return;
+        }
+
+        downloadViaAnchor(content, downloadName);
+      });
+
+      function downloadViaAnchor(content, downloadName) {
         var blob = new Blob([content], { type: "application/octet-stream" });
         var objectUrl = URL.createObjectURL(blob);
 
         var anchor = document.createElement("a");
         anchor.href = objectUrl;
         anchor.download = downloadName;
+        anchor.style.display = "none";
         document.body.appendChild(anchor);
         anchor.click();
-        anchor.remove();
 
+        // Keep the object URL and anchor alive until the browser has
+        // started the download. Revoking too early can yield incomplete
+        // or oddly named files (e.g. *.download) in Edge.
         setTimeout(function () {
+          if (anchor.parentNode) {
+            anchor.parentNode.removeChild(anchor);
+          }
           URL.revokeObjectURL(objectUrl);
-        }, 1000);
+        }, 2000);
 
         setStatus("Downloaded " + downloadName, "ok");
-      });
+      }
 
       updatePreview();
     })();
