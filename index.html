@@ -159,7 +159,8 @@
 
     .btn-primary:hover { background: #4ecbb2; }
 
-    .btn-primary:disabled {
+    .btn-primary:disabled,
+    .btn-zip:disabled {
       opacity: 0.45;
       cursor: not-allowed;
       transform: none;
@@ -176,14 +177,26 @@
       border-color: rgba(232, 238, 246, 0.28);
     }
 
+    .btn-zip {
+      width: 100%;
+      background: var(--bg2);
+      color: var(--ink);
+      border: 1px solid rgba(61, 184, 160, 0.55);
+    }
+
+    .btn-zip:hover {
+      border-color: var(--accent);
+      background: #2a384c;
+    }
+
     .save-tip {
       margin: 0;
-      padding: 0.75rem 0.85rem;
+      padding: 0.7rem 0.85rem;
       border-radius: 10px;
       border: 1px solid rgba(61, 184, 160, 0.28);
       background: rgba(61, 184, 160, 0.08);
       font-size: 0.84rem;
-      line-height: 1.45;
+      line-height: 1.4;
       color: var(--ink);
     }
 
@@ -192,15 +205,34 @@
       font-weight: 700;
     }
 
-    .save-tip code {
-      font-family: var(--font-mono);
-      font-size: 0.82rem;
-      color: #c5d4e4;
+    .save-tip .en {
+      margin: 0.25rem 0 0;
+      color: var(--ink);
     }
 
     .save-tip .zh {
-      margin-top: 0.45rem;
+      margin: 0.2rem 0 0;
       color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .save-tip code {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: #c5d4e4;
+    }
+
+    .save-tip .tip-or {
+      margin: 0.55rem 0;
+      text-align: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .save-tip .tip-or + .en {
+      margin-top: 0;
     }
 
     .status {
@@ -348,10 +380,13 @@
         </div>
         <div class="save-tip" role="note">
           <strong>Important:</strong>
-          When the Save dialog appears, make sure the file name ends with <code>".url"</code><br />
-          Example: <code>URL-Shortcut-Creator.url</code>
+          <p class="en">When the Save dialog appears, make sure the file name ends with <code>".url"</code><br />Example: <code>URL-Shortcut-Creator.url</code></p>
           <p class="zh">儲存時請確認檔名最後有 <code>.url</code><br />例如：<code>URL-Shortcut-Creator.url</code></p>
+          <div class="tip-or">OR</div>
+          <p class="en">Save directly as a ZIP file.</p>
+          <p class="zh">直接儲存成 ZIP</p>
         </div>
+        <button type="button" class="btn-zip" id="zipBtn">Download as ZIP</button>
       </div>
 
       <p class="status" id="status" role="status" aria-live="polite"></p>
@@ -389,11 +424,114 @@ URL=</pre>
       var statusEl = document.getElementById("status");
       var resetBtn = document.getElementById("resetBtn");
       var downloadBtn = document.getElementById("downloadBtn");
+      var zipBtn = document.getElementById("zipBtn");
       var saveModal = document.getElementById("saveModal");
       var saveModalExample = document.getElementById("saveModalExample");
       var saveModalCancel = document.getElementById("saveModalCancel");
       var saveModalContinue = document.getElementById("saveModalContinue");
       var pendingSave = null;
+
+      var CRC_TABLE = (function () {
+        var table = new Uint32Array(256);
+        for (var i = 0; i < 256; i++) {
+          var c = i;
+          for (var k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+          }
+          table[i] = c >>> 0;
+        }
+        return table;
+      })();
+
+      function crc32Bytes(bytes) {
+        var crc = 0xffffffff;
+        for (var i = 0; i < bytes.length; i++) {
+          crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+      }
+
+      function u16(n) {
+        return new Uint8Array([n & 0xff, (n >>> 8) & 0xff]);
+      }
+
+      function u32(n) {
+        return new Uint8Array([
+          n & 0xff,
+          (n >>> 8) & 0xff,
+          (n >>> 16) & 0xff,
+          (n >>> 24) & 0xff
+        ]);
+      }
+
+      function concatBytes(parts) {
+        var total = 0;
+        for (var i = 0; i < parts.length; i++) total += parts[i].length;
+        var out = new Uint8Array(total);
+        var offset = 0;
+        for (var j = 0; j < parts.length; j++) {
+          out.set(parts[j], offset);
+          offset += parts[j].length;
+        }
+        return out;
+      }
+
+      // Minimal ZIP (store / no compression) for a single file — no CDN needed.
+      function createZipBlob(entryName, fileText) {
+        var encoder = new TextEncoder();
+        var nameBytes = encoder.encode(entryName);
+        var dataBytes = encoder.encode(fileText);
+        var crc = crc32Bytes(dataBytes);
+        var size = dataBytes.length;
+        var localHeader = concatBytes([
+          u32(0x04034b50),
+          u16(20),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(crc),
+          u32(size),
+          u32(size),
+          u16(nameBytes.length),
+          u16(0),
+          nameBytes
+        ]);
+        var centralHeader = concatBytes([
+          u32(0x02014b50),
+          u16(20),
+          u16(20),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(crc),
+          u32(size),
+          u32(size),
+          u16(nameBytes.length),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(0),
+          u32(0),
+          nameBytes
+        ]);
+        var endRecord = concatBytes([
+          u32(0x06054b50),
+          u16(0),
+          u16(0),
+          u16(1),
+          u16(1),
+          u32(centralHeader.length),
+          u32(localHeader.length + dataBytes.length),
+          u16(0)
+        ]);
+        return new Blob(
+          [localHeader, dataBytes, centralHeader, endRecord],
+          { type: "application/zip" }
+        );
+      }
 
       function normalizeUrl(raw) {
         var value = (raw || "").trim();
@@ -423,7 +561,7 @@ URL=</pre>
         if (!base) {
           base = fallbackHost || "shortcut";
         }
-        base = base.replace(/\.url$/i, "");
+        base = base.replace(/\.url$/i, "").replace(/\.zip$/i, "");
         base = base.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/\s+/g, " ").trim();
         if (!base) base = "shortcut";
         if (base.length > 100) base = base.slice(0, 100);
@@ -461,6 +599,7 @@ URL=</pre>
           url: url,
           baseName: baseName,
           urlFileName: baseName + ".url",
+          zipFileName: baseName + ".zip",
           content: buildUrlFileContent(url)
         };
       }
@@ -526,8 +665,10 @@ URL=</pre>
         downloadViaAnchor(content, downloadName);
       }
 
-      function downloadViaAnchor(content, downloadName) {
-        var blob = new Blob([content], { type: "application/octet-stream" });
+      function downloadViaAnchor(contentOrBlob, downloadName, mimeType) {
+        var blob = contentOrBlob instanceof Blob
+          ? contentOrBlob
+          : new Blob([contentOrBlob], { type: mimeType || "application/octet-stream" });
         var objectUrl = URL.createObjectURL(blob);
 
         var anchor = document.createElement("a");
@@ -569,6 +710,15 @@ URL=</pre>
           content: inputs.content
         };
         openSaveModal(pendingSave.downloadName);
+      });
+
+      zipBtn.addEventListener("click", function () {
+        setStatus("");
+        var inputs = getValidatedInputs();
+        if (!inputs) return;
+
+        var zipBlob = createZipBlob(inputs.urlFileName, inputs.content);
+        downloadViaAnchor(zipBlob, inputs.zipFileName, "application/zip");
       });
 
       saveModalCancel.addEventListener("click", function () {
